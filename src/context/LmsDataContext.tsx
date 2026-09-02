@@ -236,24 +236,70 @@ export const LmsDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   });
 
-  // Real-time Cloud Firestore Synchronizer
-  const syncToCloud = useCallback(async (partialData: Record<string, any>) => {
-    try {
-      const docRef = doc(firestoreDb, FIRESTORE_DOC_PATH, FIRESTORE_DOC_ID);
-      await setDoc(docRef, { ...partialData, updatedAt: new Date().toISOString() }, { merge: true });
-    } catch (err) {
-      console.warn('Firestore sync failed, fallback to server API:', err);
+  // Circuit breaker flag for Firestore quota exhaustion
+  const [isQuotaExhausted, setIsQuotaExhausted] = useState<boolean>(false);
+  const quotaExhaustedUntilRef = React.useRef<number>(0);
+  const syncTimeoutRef = React.useRef<any>(null);
+  const pendingSyncDataRef = React.useRef<Record<string, any>>({});
+
+  // Real-time Cloud Firestore Synchronizer with debouncing & quota circuit breaker
+  const flushSyncToCloud = useCallback(async (dataToSync: Record<string, any>) => {
+    const now = Date.now();
+    // If quota was exhausted recently, skip Firestore and write directly to local/server
+    const isUnderQuotaLockout = now < quotaExhaustedUntilRef.current;
+
+    if (!isUnderQuotaLockout) {
       try {
-        await fetch('/api/sync', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(partialData),
-        });
-      } catch (e) {
-        console.error('All sync channels failed:', e);
+        const docRef = doc(firestoreDb, FIRESTORE_DOC_PATH, FIRESTORE_DOC_ID);
+        await setDoc(docRef, { ...dataToSync, updatedAt: new Date().toISOString() }, { merge: true });
+        return;
+      } catch (err: any) {
+        const errMsg = err?.message || String(err);
+        if (errMsg.includes('resource-exhausted') || errMsg.includes('Quota limit') || errMsg.includes('quota')) {
+          // Lockout Firestore write retries for 3 minutes to avoid hammering the API
+          quotaExhaustedUntilRef.current = Date.now() + 180000;
+          setIsQuotaExhausted(true);
+          console.warn('Firestore write quota reached. Switched seamlessly to local/server storage mode.');
+        } else {
+          console.warn('Firestore sync note:', errMsg);
+        }
       }
     }
+
+    // Fallback to server API if available
+    try {
+      await fetch('/api/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(dataToSync),
+      });
+    } catch {
+      // Offline/static fallback handled by localStorage
+    }
   }, []);
+
+  const syncToCloud = useCallback((partialData: Record<string, any>, immediate: boolean = false) => {
+    pendingSyncDataRef.current = { ...pendingSyncDataRef.current, ...partialData };
+
+    if (immediate) {
+      if (syncTimeoutRef.current) {
+        clearTimeout(syncTimeoutRef.current);
+        syncTimeoutRef.current = null;
+      }
+      const data = { ...pendingSyncDataRef.current };
+      pendingSyncDataRef.current = {};
+      flushSyncToCloud(data);
+    } else {
+      if (!syncTimeoutRef.current) {
+        syncTimeoutRef.current = setTimeout(() => {
+          syncTimeoutRef.current = null;
+          const data = { ...pendingSyncDataRef.current };
+          pendingSyncDataRef.current = {};
+          flushSyncToCloud(data);
+        }, 5000); // 5s debounce
+      }
+    }
+  }, [flushSyncToCloud]);
 
   // Real-time listener: onSnapshot listens for instant changes across ALL devices and accounts globally
   useEffect(() => {
