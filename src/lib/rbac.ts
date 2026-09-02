@@ -16,7 +16,13 @@ export const PERMISSIONS: Record<Role, string[]> = {
   INSTRUCTOR: [
     'lesson:view',
     'lesson:edit',
+    'lesson:create',
+    'lesson:delete',
     'lesson:progress',
+    'course:manage',
+    'classroom:manage',
+    'user:manage',
+    'report:view',
     'activity:view',
     'activity:grade',
     'activity:create',
@@ -32,7 +38,9 @@ export const PERMISSIONS: Record<Role, string[]> = {
     'material:manage',
     'student:view_progress',
     'certificate:issue',
+    'certificate:manage',
     'calendar:manage',
+    'audit:view',
   ],
   ADMIN: [
     'lesson:view',

@@ -1,0 +1,54 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User accounts including students, instructors, and administrators",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "password": { "type": "string" },
+        "role": { "type": "string", "enum": ["STUDENT", "INSTRUCTOR", "ADMIN", "SUPER_ADMIN"] },
+        "organizationId": { "type": "string" },
+        "registrationNumber": { "type": "string" },
+        "rank": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "name", "email", "role", "organizationId", "createdAt"]
+    },
+    "Enrollment": {
+      "title": "Enrollment",
+      "description": "Student course and classroom enrollment records",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "studentId": { "type": "string" },
+        "classroomId": { "type": "string" },
+        "courseId": { "type": "string" },
+        "enrolledAt": { "type": "string" },
+        "active": { "type": "boolean" }
+      },
+      "required": ["id", "studentId", "classroomId", "courseId", "enrolledAt", "active"]
+    },
+    "Classroom": {
+      "title": "Classroom",
+      "description": "Classrooms and batches for student groupings",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "organizationId": { "type": "string" },
+        "code": { "type": "string" },
+        "name": { "type": "string" },
+        "courseId": { "type": "string" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "instructorIds": { "type": "array", "items": { "type": "string" } },
+        "maxCapacity": { "type": "number" },
+        "location": { "type": "string" }
+      },
+      "required": ["id", "organizationId", "code", "name", "courseId", "startDate", "endDate"]
+    }
+  }
+}

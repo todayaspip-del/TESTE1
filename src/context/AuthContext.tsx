@@ -13,6 +13,15 @@ interface AuthContextType {
   usersList: User[];
   login: (email: string, password: string) => { ok: true } | { ok: false; error: string };
   register: (name: string, email: string, password: string) => { ok: true } | { ok: false; error: string };
+  createStudentUser: (data: {
+    name: string;
+    email: string;
+    password?: string;
+    registrationNumber?: string;
+    rank?: string;
+    role?: Role;
+  }) => Promise<{ ok: true; user: User } | { ok: false; error: string }>;
+  updateUserRole: (userId: string, newRole: Role) => Promise<{ ok: true } | { ok: false; error: string }>;
   logout: () => void;
   can: (action: string) => boolean;
   isAuthenticated: boolean;
@@ -201,6 +210,89 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return { ok: true };
   };
 
+  const createStudentUser = async (data: {
+    name: string;
+    email: string;
+    password?: string;
+    registrationNumber?: string;
+    rank?: string;
+    role?: Role;
+  }): Promise<{ ok: true; user: User } | { ok: false; error: string }> => {
+    const trimmedName = data.name.trim();
+    const normalizedEmail = data.email.trim().toLowerCase();
+
+    if (!trimmedName) {
+      return { ok: false, error: 'Informe o nome completo do usuário.' };
+    }
+    if (!normalizedEmail || !normalizedEmail.includes('@') || !normalizedEmail.includes('.')) {
+      return { ok: false, error: 'Informe um endereço de e-mail válido.' };
+    }
+    if (usersList.some((u) => u.email.toLowerCase() === normalizedEmail)) {
+      return { ok: false, error: 'Já existe um usuário cadastrado com este e-mail no sistema.' };
+    }
+
+    const assignedRole: Role = data.role || (resolveRoleFromEmail(normalizedEmail) === 'INSTRUCTOR' ? 'INSTRUCTOR' : 'STUDENT');
+    const defaultPrefix = assignedRole === 'INSTRUCTOR' ? 'INST' : 'REC';
+    const regNum =
+      data.registrationNumber?.trim() || `${defaultPrefix}-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const pass = data.password?.trim() || '123456';
+    const defaultRank = assignedRole === 'INSTRUCTOR' ? 'Instrutor / Oficial' : 'Recruta / Aluno';
+
+    const newUser: User = {
+      id: `usr-${assignedRole === 'INSTRUCTOR' ? 'inst' : 'rec'}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      name: trimmedName,
+      email: normalizedEmail,
+      password: pass,
+      role: assignedRole,
+      avatarUrl: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(trimmedName)}&backgroundColor=${
+        assignedRole === 'INSTRUCTOR' ? '10b981' : 'ea580c'
+      }`,
+      organizationId: organization.id,
+      registrationNumber: regNum,
+      rank: data.rank?.trim() || defaultRank,
+      createdAt: new Date().toISOString(),
+    };
+
+    const nextUsers = [...usersList, newUser];
+    setUsersList(nextUsers);
+    await syncUsersToCloud(nextUsers);
+    return { ok: true, user: newUser };
+  };
+
+  const updateUserRole = async (userId: string, newRole: Role): Promise<{ ok: true } | { ok: false; error: string }> => {
+    const target = usersList.find((u) => u.id === userId);
+    if (!target) {
+      return { ok: false, error: 'Usuário não encontrado.' };
+    }
+
+    const updatedUsers = usersList.map((u) => {
+      if (u.id === userId) {
+        return {
+          ...u,
+          role: newRole,
+          rank:
+            newRole === 'INSTRUCTOR' && (u.rank === 'Recruta / Aluno' || u.rank === 'Aluno')
+              ? 'Instrutor / Oficial'
+              : newRole === 'STUDENT' && (u.rank === 'Instrutor / Oficial' || u.rank === 'Instrutor')
+              ? 'Recruta / Aluno'
+              : u.rank,
+        };
+      }
+      return u;
+    });
+
+    setUsersList(updatedUsers);
+    await syncUsersToCloud(updatedUsers);
+
+    // If current user is modified, update session state too
+    if (currentUser?.id === userId) {
+      const updatedSelf = updatedUsers.find((u) => u.id === userId);
+      if (updatedSelf) setCurrentUser(updatedSelf);
+    }
+
+    return { ok: true };
+  };
+
   const logout = () => {
     setCurrentUser(null);
   };
@@ -218,6 +310,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         usersList,
         login,
         register,
+        createStudentUser,
+        updateUserRole,
         logout,
         can,
         isAuthenticated: !!currentUser,
