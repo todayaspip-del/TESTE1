@@ -95,9 +95,9 @@ export const StudentMaterials: React.FC = () => {
       // Upload the real file bytes — fixes downloads arriving corrupted/truncated.
       const downloadUrl = await uploadMaterialFile(file, key, setUploadProgress);
       setStorageKey(downloadUrl);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Falha no upload do material:', err);
-      setUploadError('Falha ao enviar o arquivo. Tente novamente.');
+      setUploadError(err?.message || 'Falha ao enviar o arquivo. Tente novamente.');
       setUploadedFileName('');
     } finally {
       setIsUploading(false);

@@ -107,9 +107,9 @@ export const LessonMaterialManagerModal: React.FC<LessonMaterialManagerModalProp
       // the downloaded file match the original instead of a truncated/fake one.
       const downloadUrl = await uploadMaterialFile(file, key, setUploadProgress);
       setStorageKey(downloadUrl);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Falha no upload do material:', err);
-      setUploadError('Falha ao enviar o arquivo. Tente novamente.');
+      setUploadError(err?.message || 'Falha ao enviar o arquivo. Tente novamente.');
       setUploadedFileName('');
     } finally {
       setIsUploading(false);
