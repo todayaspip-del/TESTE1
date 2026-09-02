@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { Lesson, LessonMaterial, Course } from '../../types';
 import { useLmsData } from '../../context/LmsDataContext';
-import { getFileBadgeColor, formatFileSize, triggerMaterialDownload } from '../../lib/storage';
+import { getFileBadgeColor, formatFileSize, triggerMaterialDownload, uploadMaterialFile } from '../../lib/storage';
 import { ConfirmModal } from '../common/ConfirmModal';
 import {
   FileText,
@@ -78,8 +78,11 @@ export const LessonMaterialManagerModal: React.FC<LessonMaterialManagerModalProp
   const [linkUrl, setLinkUrl] = useState('');
   const [isLinkMode, setIsLinkMode] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
-  const handleFileSelect = (file: File) => {
+  const handleFileSelect = async (file: File) => {
     setUploadedFileName(file.name);
     if (!materialTitle) {
       const nameWithoutExt = file.name.replace(/\.[^/.]+$/, '');
@@ -94,7 +97,23 @@ export const LessonMaterialManagerModal: React.FC<LessonMaterialManagerModalProp
     else if (ext === 'zip' || ext === 'rar') setFileType('zip');
     else setFileType('pdf');
 
-    setStorageKey(`materials/${lesson.id}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`);
+    const key = `materials/${lesson.id}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+    setStorageKey('');
+    setUploadError(null);
+    setIsUploading(true);
+    setUploadProgress(0);
+    try {
+      // Upload the real file bytes to Firebase Storage — this is what makes
+      // the downloaded file match the original instead of a truncated/fake one.
+      const downloadUrl = await uploadMaterialFile(file, key, setUploadProgress);
+      setStorageKey(downloadUrl);
+    } catch (err) {
+      console.error('Falha no upload do material:', err);
+      setUploadError('Falha ao enviar o arquivo. Tente novamente.');
+      setUploadedFileName('');
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -111,10 +130,16 @@ export const LessonMaterialManagerModal: React.FC<LessonMaterialManagerModalProp
       alert('Informe o título do material de apoio.');
       return;
     }
+    if (isUploading) {
+      alert('Aguarde o upload do arquivo terminar antes de anexar.');
+      return;
+    }
+    if (!isLinkMode && !storageKey) {
+      alert('Selecione um arquivo para enviar (ou aguarde o upload concluir).');
+      return;
+    }
 
-    const finalStorageKey = isLinkMode
-      ? linkUrl || 'https://fireman-docs.gov.br/normas'
-      : storageKey || `materials/${lesson.id}/${Date.now()}_${materialTitle.toLowerCase().replace(/\s+/g, '_')}.${fileType}`;
+    const finalStorageKey = isLinkMode ? (linkUrl || '') : storageKey;
 
     const newMaterial: LessonMaterial = {
       id: `mat-${Date.now()}`,
@@ -323,12 +348,20 @@ export const LessonMaterialManagerModal: React.FC<LessonMaterialManagerModalProp
                 }}
               />
               <div className="w-10 h-10 rounded-none bg-orange-500/10 border border-orange-500/30 text-orange-400 flex items-center justify-center">
-                {uploadedFileName ? <CheckCircle className="w-5 h-5 text-emerald-400" /> : <FileUp className="w-5 h-5" />}
+                {isUploading ? (
+                  <UploadCloud className="w-5 h-5 animate-pulse" />
+                ) : uploadedFileName && storageKey ? (
+                  <CheckCircle className="w-5 h-5 text-emerald-400" />
+                ) : (
+                  <FileUp className="w-5 h-5" />
+                )}
               </div>
-              <div className="space-y-0.5">
+              <div className="space-y-0.5 w-full">
                 <p className="text-xs font-bold text-white">
-                  {uploadedFileName ? (
-                    <span className="text-emerald-400">Arquivo Selecionado: {uploadedFileName}</span>
+                  {isUploading ? (
+                    <span className="text-orange-400">Enviando {uploadedFileName}... {uploadProgress}%</span>
+                  ) : uploadedFileName && storageKey ? (
+                    <span className="text-emerald-400">Arquivo Enviado: {uploadedFileName}</span>
                   ) : (
                     'Clique para selecionar ou arraste o arquivo aqui'
                   )}
@@ -336,6 +369,15 @@ export const LessonMaterialManagerModal: React.FC<LessonMaterialManagerModalProp
                 <p className="text-[10px] text-slate-400">
                   Formatos aceitos: PDF, Apostilas Word (.docx), Slides (.pptx), Planilhas (.xlsx) ou ZIP (Até 50MB)
                 </p>
+                {uploadError && <p className="text-[10px] text-red-400 font-bold">{uploadError}</p>}
+                {isUploading && (
+                  <div className="w-full h-1.5 bg-slate-800 mt-1 overflow-hidden">
+                    <div
+                      className="h-full bg-orange-500 transition-all"
+                      style={{ width: `${uploadProgress}%` }}
+                    />
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -430,10 +472,11 @@ export const LessonMaterialManagerModal: React.FC<LessonMaterialManagerModalProp
             </button>
             <button
               type="submit"
-              className="flex items-center gap-2 px-6 py-2.5 rounded-none bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold uppercase tracking-wider transition shadow-lg shadow-orange-950/60 cursor-pointer active:scale-95"
+              disabled={isUploading}
+              className="flex items-center gap-2 px-6 py-2.5 rounded-none bg-orange-600 hover:bg-orange-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white text-xs font-bold uppercase tracking-wider transition shadow-lg shadow-orange-950/60 cursor-pointer active:scale-95"
             >
               <Plus className="w-4 h-4" />
-              <span>Anexar Material à Aula</span>
+              <span>{isUploading ? `Enviando... ${uploadProgress}%` : 'Anexar Material à Aula'}</span>
             </button>
           </div>
         </form>

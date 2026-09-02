@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { useLmsData } from '../../context/LmsDataContext';
 import { useAuth } from '../../context/AuthContext';
 import { LessonMaterial } from '../../types';
-import { getFileBadgeColor, formatFileSize, triggerMaterialDownload } from '../../lib/storage';
+import { getFileBadgeColor, formatFileSize, triggerMaterialDownload, uploadMaterialFile } from '../../lib/storage';
 import { ConfirmModal } from '../common/ConfirmModal';
 import {
   FolderDown,
@@ -53,6 +53,9 @@ export const StudentMaterials: React.FC = () => {
   const [uploadedFileName, setUploadedFileName] = useState('');
   const [visibility, setVisibility] = useState<'STUDENT' | 'INSTRUCTOR_ONLY'>('STUDENT');
   const [isDragOver, setIsDragOver] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const selectedTargetCourse = courses.find((c) => c.id === targetCourseId);
   const targetCourseLessons: Array<{ id: string; title: string; moduleTitle: string }> = [];
@@ -68,7 +71,7 @@ export const StudentMaterials: React.FC = () => {
     });
   }
 
-  const handleFileSelect = (file: File) => {
+  const handleFileSelect = async (file: File) => {
     setUploadedFileName(file.name);
     if (!materialTitle) {
       // Remove extension for default title
@@ -83,7 +86,22 @@ export const StudentMaterials: React.FC = () => {
     else if (ext === 'pptx' || ext === 'ppt') setFileType('pptx');
     else if (ext === 'zip' || ext === 'rar') setFileType('zip');
 
-    setStorageKey(`uploads/materials/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`);
+    const key = `uploads/materials/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+    setStorageKey('');
+    setUploadError(null);
+    setIsUploading(true);
+    setUploadProgress(0);
+    try {
+      // Upload the real file bytes — fixes downloads arriving corrupted/truncated.
+      const downloadUrl = await uploadMaterialFile(file, key, setUploadProgress);
+      setStorageKey(downloadUrl);
+    } catch (err) {
+      console.error('Falha no upload do material:', err);
+      setUploadError('Falha ao enviar o arquivo. Tente novamente.');
+      setUploadedFileName('');
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -104,13 +122,21 @@ export const StudentMaterials: React.FC = () => {
       alert('Por favor, informe o título da apostila ou material.');
       return;
     }
+    if (isUploading) {
+      alert('Aguarde o upload do arquivo terminar antes de publicar.');
+      return;
+    }
+    if (!storageKey) {
+      alert('Selecione um arquivo para enviar (ou aguarde o upload concluir).');
+      return;
+    }
 
     const newMaterial: LessonMaterial = {
       id: `mat-${Date.now()}`,
       lessonId: targetLessonId || `les-${Date.now()}`,
       title: materialTitle.trim(),
       fileType,
-      storageKey: storageKey || `apostilas/${Date.now()}_${materialTitle.toLowerCase().replace(/\s+/g, '_')}.${fileType}`,
+      storageKey,
       fileSize: fileSizeStr || '2.5 MB',
       visibility,
       downloadable: true,
@@ -421,8 +447,20 @@ export const StudentMaterials: React.FC = () => {
                     }
                   }}
                 />
-                <UploadCloud className="w-10 h-10 text-orange-400 mb-2" />
-                {uploadedFileName ? (
+                <UploadCloud className={`w-10 h-10 text-orange-400 mb-2 ${isUploading ? 'animate-pulse' : ''}`} />
+                {isUploading ? (
+                  <div className="space-y-1 w-full max-w-xs">
+                    <p className="text-xs font-bold text-orange-400">
+                      Enviando {uploadedFileName}... {uploadProgress}%
+                    </p>
+                    <div className="w-full h-1.5 bg-slate-800 overflow-hidden rounded-full">
+                      <div
+                        className="h-full bg-orange-500 transition-all"
+                        style={{ width: `${uploadProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                ) : uploadedFileName && storageKey ? (
                   <div className="space-y-1">
                     <p className="text-xs font-bold text-white flex items-center justify-center gap-1.5">
                       <CheckCircle className="w-4 h-4 text-emerald-400" />
@@ -441,6 +479,7 @@ export const StudentMaterials: React.FC = () => {
                     </p>
                   </div>
                 )}
+                {uploadError && <p className="text-[10px] text-red-400 font-bold mt-2">{uploadError}</p>}
               </div>
 
               {/* Title */}
@@ -509,9 +548,10 @@ export const StudentMaterials: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-6 py-2.5 rounded-lg bg-orange-600 hover:bg-orange-500 text-white text-xs font-black uppercase tracking-wider shadow-lg shadow-orange-950/60 transition cursor-pointer"
+                  disabled={isUploading}
+                  className="px-6 py-2.5 rounded-lg bg-orange-600 hover:bg-orange-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white text-xs font-black uppercase tracking-wider shadow-lg shadow-orange-950/60 transition cursor-pointer"
                 >
-                  Publicar Apostila
+                  {isUploading ? `Enviando... ${uploadProgress}%` : 'Publicar Apostila'}
                 </button>
               </div>
             </form>
