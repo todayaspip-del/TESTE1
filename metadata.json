@@ -1,0 +1,6 @@
+{
+  "name": "LMS Bombeiro Civil - Academia de Formação e Treinamento",
+  "description": "Plataforma LMS completa para Formação e Treinamento de Bombeiro Civil e Voluntário com módulos NBR 14608, player de vídeo interativo, controle de progresso, avaliações teóricas, emissão de certificados e painel administrativo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
