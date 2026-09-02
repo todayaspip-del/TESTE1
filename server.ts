@@ -1,10 +1,19 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { readDatabase, writeDatabase, LmsDatabase } from './lib/db';
 
 const app = express();
 const PORT = 3000;
+
+// Ensure materials directory exists
+const MATERIALS_DIR = path.join(process.cwd(), 'data', 'materials');
+if (!fs.existsSync(MATERIALS_DIR)) {
+  try {
+    fs.mkdirSync(MATERIALS_DIR, { recursive: true });
+  } catch {}
+}
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -12,6 +21,67 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // API Routes (same contract as the /api/*.ts Vercel functions, used for local dev)
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
+});
+
+// Materials Streaming Upload (Instant 0-100% progress for 12MB+ files)
+app.post('/api/materials/upload', (req, res) => {
+  try {
+    const rawFileName = (req.headers['x-file-name'] as string) || 'material';
+    let decodedFileName = 'material';
+    try {
+      decodedFileName = decodeURIComponent(rawFileName);
+    } catch {
+      decodedFileName = rawFileName;
+    }
+    const contentType =
+      (req.headers['x-file-type'] as string) ||
+      (req.headers['content-type'] as string) ||
+      'application/octet-stream';
+    const ext = path.extname(decodedFileName) || '.bin';
+    const cleanExt = ext.startsWith('.') ? ext : `.${ext}`;
+    const fileId = `mat_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const savedFileName = `${fileId}${cleanExt}`;
+    const filePath = path.join(MATERIALS_DIR, savedFileName);
+
+    const writeStream = fs.createWriteStream(filePath);
+    req.pipe(writeStream);
+
+    writeStream.on('finish', () => {
+      const stats = fs.existsSync(filePath) ? fs.statSync(filePath) : { size: 0 };
+      res.json({
+        ok: true,
+        fileId,
+        fileName: decodedFileName,
+        url: `/api/materials/file/${savedFileName}`,
+        size: stats.size,
+        contentType,
+      });
+    });
+
+    writeStream.on('error', (err) => {
+      console.error('Error writing material file:', err);
+      res.status(500).json({ ok: false, error: 'Failed to write material file' });
+    });
+  } catch (error: any) {
+    console.error('Upload error:', error);
+    res.status(500).json({ ok: false, error: error?.message || 'Upload failed' });
+  }
+});
+
+// Materials Streaming Download / Serve
+app.get('/api/materials/file/:filename', (req, res) => {
+  try {
+    const filename = path.basename(req.params.filename);
+    const filePath = path.join(MATERIALS_DIR, filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).send('Material file not found');
+    }
+
+    res.sendFile(filePath);
+  } catch (error: any) {
+    res.status(500).send('Error reading material file');
+  }
 });
 
 app.get('/api/data', async (_req, res) => {
