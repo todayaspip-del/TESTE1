@@ -738,7 +738,7 @@ export const AdminStudents: React.FC = () => {
                                 enr.courseId || courses[0]?.id || 'crs-1',
                                 studentName
                               );
-                              setSelectedCert(issued);
+                              if (issued) setSelectedCert(issued);
                             }}
                             className="px-2.5 py-1.5 rounded-none bg-emerald-600/20 border border-emerald-500/40 text-emerald-400 text-[11px] font-bold transition hover:bg-emerald-600/30 cursor-pointer"
                           >

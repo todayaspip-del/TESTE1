@@ -38,6 +38,7 @@ import {
   SEED_AUDIT_LOGS,
 } from '../data/seedData';
 import { useAuth } from './AuthContext';
+import { hasPermission } from '../lib/rbac';
 import confetti from 'canvas-confetti';
 
 interface LmsDataContextType {
@@ -77,7 +78,7 @@ interface LmsDataContextType {
   gradeSubmission: (submissionId: string, score: number, feedback: string) => void;
 
   // Certificates
-  issueCertificate: (studentId: string, courseId: string, studentName?: string, courseTitle?: string) => Certificate;
+  issueCertificate: (studentId: string, courseId: string, studentName?: string, courseTitle?: string) => Certificate | null;
   getCertificateByCode: (code: string) => Certificate | undefined;
   deleteCertificate: (certId: string) => void;
 
@@ -117,6 +118,46 @@ const LmsDataContext = createContext<LmsDataContextType | undefined>(undefined);
 const STORAGE_PREFIX = 'vulcan_lms_prod_data_v3_';
 const FIRESTORE_DOC_PATH = 'system_data';
 const FIRESTORE_DOC_ID = 'lms_main_db';
+
+// Chaves de sincronização -> sufixo usado no localStorage
+const LS_SUFFIX: Record<string, string> = {
+  courses: 'courses',
+  classrooms: 'classrooms',
+  enrollments: 'enrollments',
+  lessonProgress: 'lesson_progress',
+  comments: 'comments',
+  announcements: 'announcements',
+  calendarEvents: 'calendar',
+  certificates: 'certificates',
+  privateNotes: 'private_notes',
+  auditLogs: 'audit_logs',
+  quizAttempts: 'quiz_attempts',
+  submissions: 'submissions',
+};
+
+// Registro persistente de dados alterados localmente que ainda NÃO foram confirmados na nuvem.
+// Evita que o listener em tempo real sobrescreva alterações pendentes com dados antigos.
+const DIRTY_KEY = STORAGE_PREFIX + 'dirty_keys';
+const readDirtyKeys = (): string[] => {
+  try {
+    const raw = localStorage.getItem(DIRTY_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+const writeDirtyKeys = (keys: string[]) => {
+  try {
+    if (keys.length === 0) localStorage.removeItem(DIRTY_KEY);
+    else localStorage.setItem(DIRTY_KEY, JSON.stringify(Array.from(new Set(keys))));
+  } catch {
+    /* ignore */
+  }
+};
+
+// Firestore rejeita valores `undefined` (ex.: explanation: undefined). Remove-os antes de gravar.
+const stripUndefined = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 
 export const LmsDataProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { currentUser } = useAuth();
@@ -242,64 +283,122 @@ export const LmsDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const syncTimeoutRef = React.useRef<any>(null);
   const pendingSyncDataRef = React.useRef<Record<string, any>>({});
 
-  // Real-time Cloud Firestore Synchronizer with debouncing & quota circuit breaker
+  // Real-time Cloud Firestore Synchronizer with quota circuit breaker
   const flushSyncToCloud = useCallback(async (dataToSync: Record<string, any>) => {
+    const keys = Object.keys(dataToSync);
+    if (keys.length === 0) return;
+
+    let cleanData: Record<string, any>;
+    try {
+      cleanData = stripUndefined(dataToSync);
+    } catch (err) {
+      console.warn('Falha ao preparar dados para sincronização:', err);
+      return;
+    }
+
+    const markSynced = () => {
+      // Só limpa o "pendente" das chaves que não receberam alterações mais novas nesse meio tempo
+      const stillPending = new Set(Object.keys(pendingSyncDataRef.current));
+      writeDirtyKeys(readDirtyKeys().filter((k) => !keys.includes(k) || stillPending.has(k)));
+    };
+
     const now = Date.now();
-    // If quota was exhausted recently, skip Firestore and write directly to local/server
     const isUnderQuotaLockout = now < quotaExhaustedUntilRef.current;
 
     if (!isUnderQuotaLockout) {
       try {
         const docRef = doc(firestoreDb, FIRESTORE_DOC_PATH, FIRESTORE_DOC_ID);
-        await setDoc(docRef, { ...dataToSync, updatedAt: new Date().toISOString() }, { merge: true });
+        await setDoc(docRef, { ...cleanData, updatedAt: new Date().toISOString() }, { merge: true });
+        markSynced();
         return;
       } catch (err: any) {
         const errMsg = err?.message || String(err);
         if (errMsg.includes('resource-exhausted') || errMsg.includes('Quota limit') || errMsg.includes('quota')) {
-          // Lockout Firestore write retries for 3 minutes to avoid hammering the API
           quotaExhaustedUntilRef.current = Date.now() + 180000;
           setIsQuotaExhausted(true);
           console.warn('Firestore write quota reached. Switched seamlessly to local/server storage mode.');
         } else {
-          console.warn('Firestore sync note:', errMsg);
+          console.warn('Firestore sync error:', errMsg);
         }
       }
     }
 
     // Fallback to server API if available
     try {
-      await fetch('/api/sync', {
+      const res = await fetch('/api/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(dataToSync),
+        body: JSON.stringify(cleanData),
       });
+      if (res.ok) markSynced();
     } catch {
-      // Offline/static fallback handled by localStorage
+      // Offline/static: permanece marcado como pendente e será reenviado no próximo carregamento
     }
   }, []);
 
+  const flushPendingNow = useCallback(() => {
+    if (syncTimeoutRef.current) {
+      clearTimeout(syncTimeoutRef.current);
+      syncTimeoutRef.current = null;
+    }
+    const data = { ...pendingSyncDataRef.current };
+    if (Object.keys(data).length === 0) return;
+    pendingSyncDataRef.current = {};
+    // Mantém as chaves como pendentes até a confirmação da nuvem
+    flushSyncToCloud(data);
+  }, [flushSyncToCloud]);
+
   const syncToCloud = useCallback((partialData: Record<string, any>, immediate: boolean = false) => {
     pendingSyncDataRef.current = { ...pendingSyncDataRef.current, ...partialData };
+    writeDirtyKeys([...readDirtyKeys(), ...Object.keys(partialData)]);
 
-    if (immediate) {
-      if (syncTimeoutRef.current) {
-        clearTimeout(syncTimeoutRef.current);
+    // Conteúdo (cursos, atividades, materiais, etc.) é enviado na hora; apenas progresso e logs usam debounce
+    const needsImmediate =
+      immediate || Object.keys(partialData).some((k) => k !== 'lessonProgress' && k !== 'auditLogs');
+
+    if (needsImmediate) {
+      flushPendingNow();
+    } else if (!syncTimeoutRef.current) {
+      syncTimeoutRef.current = setTimeout(() => {
         syncTimeoutRef.current = null;
-      }
-      const data = { ...pendingSyncDataRef.current };
-      pendingSyncDataRef.current = {};
-      flushSyncToCloud(data);
-    } else {
-      if (!syncTimeoutRef.current) {
-        syncTimeoutRef.current = setTimeout(() => {
-          syncTimeoutRef.current = null;
-          const data = { ...pendingSyncDataRef.current };
-          pendingSyncDataRef.current = {};
-          flushSyncToCloud(data);
-        }, 5000); // 5s debounce
-      }
+        flushPendingNow();
+      }, 5000);
     }
-  }, [flushSyncToCloud]);
+  }, [flushPendingNow]);
+
+  // Envia pendências ao sair/ocultar a página e reenvia alterações que ficaram pendentes de sessões anteriores
+  useEffect(() => {
+    const onLeave = () => flushPendingNow();
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flushPendingNow();
+    };
+    window.addEventListener('pagehide', onLeave);
+    window.addEventListener('beforeunload', onLeave);
+    document.addEventListener('visibilitychange', onVisibility);
+
+    const dirty = readDirtyKeys();
+    if (dirty.length > 0) {
+      const recovered: Record<string, any> = {};
+      dirty.forEach((k) => {
+        const suffix = LS_SUFFIX[k];
+        if (!suffix) return;
+        try {
+          const raw = localStorage.getItem(STORAGE_PREFIX + suffix);
+          if (raw) recovered[k] = JSON.parse(raw);
+        } catch {
+          /* ignore */
+        }
+      });
+      if (Object.keys(recovered).length > 0) flushSyncToCloud(recovered);
+    }
+
+    return () => {
+      window.removeEventListener('pagehide', onLeave);
+      window.removeEventListener('beforeunload', onLeave);
+      document.removeEventListener('visibilitychange', onVisibility);
+      flushPendingNow();
+    };
+  }, [flushPendingNow, flushSyncToCloud]);
 
   // Real-time listener: onSnapshot listens for instant changes across ALL devices and accounts globally
   useEffect(() => {
@@ -324,7 +423,7 @@ export const LmsDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
           submissions: [],
           updatedAt: new Date().toISOString(),
         };
-        setDoc(docRef, seedPayload);
+        setDoc(docRef, stripUndefined(seedPayload));
       }
     }).catch((err) => {
       console.warn('Firestore initial check error, attempting server fallback:', err);
@@ -334,7 +433,9 @@ export const LmsDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (!isMounted) return;
       if (snapshot.exists()) {
         const sData = snapshot.data();
-        if (Array.isArray(sData.courses) && sData.courses.length > 0) {
+        // Não sobrescreve dados locais que ainda não foram confirmados na nuvem
+        const dirty = new Set<string>([...readDirtyKeys(), ...Object.keys(pendingSyncDataRef.current)]);
+        if (!dirty.has('courses') && Array.isArray(sData.courses) && sData.courses.length > 0) {
           const sanitizedCourses = sData.courses.map((c: Course) => ({
             ...c,
             bannerUrl:
@@ -345,47 +446,47 @@ export const LmsDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setCourses(sanitizedCourses);
           localStorage.setItem(STORAGE_PREFIX + 'courses', JSON.stringify(sanitizedCourses));
         }
-        if (Array.isArray(sData.classrooms)) {
+        if (!dirty.has('classrooms') && Array.isArray(sData.classrooms)) {
           setClassrooms(sData.classrooms);
           localStorage.setItem(STORAGE_PREFIX + 'classrooms', JSON.stringify(sData.classrooms));
         }
-        if (Array.isArray(sData.enrollments)) {
+        if (!dirty.has('enrollments') && Array.isArray(sData.enrollments)) {
           setEnrollments(sData.enrollments);
           localStorage.setItem(STORAGE_PREFIX + 'enrollments', JSON.stringify(sData.enrollments));
         }
-        if (sData.lessonProgress && typeof sData.lessonProgress === 'object') {
+        if (!dirty.has('lessonProgress') && sData.lessonProgress && typeof sData.lessonProgress === 'object') {
           setLessonProgress(sData.lessonProgress);
           localStorage.setItem(STORAGE_PREFIX + 'lesson_progress', JSON.stringify(sData.lessonProgress));
         }
-        if (Array.isArray(sData.comments)) {
+        if (!dirty.has('comments') && Array.isArray(sData.comments)) {
           setComments(sData.comments);
           localStorage.setItem(STORAGE_PREFIX + 'comments', JSON.stringify(sData.comments));
         }
-        if (Array.isArray(sData.announcements)) {
+        if (!dirty.has('announcements') && Array.isArray(sData.announcements)) {
           setAnnouncements(sData.announcements);
           localStorage.setItem(STORAGE_PREFIX + 'announcements', JSON.stringify(sData.announcements));
         }
-        if (Array.isArray(sData.calendarEvents)) {
+        if (!dirty.has('calendarEvents') && Array.isArray(sData.calendarEvents)) {
           setCalendarEvents(sData.calendarEvents);
           localStorage.setItem(STORAGE_PREFIX + 'calendar', JSON.stringify(sData.calendarEvents));
         }
-        if (Array.isArray(sData.certificates)) {
+        if (!dirty.has('certificates') && Array.isArray(sData.certificates)) {
           setCertificates(sData.certificates);
           localStorage.setItem(STORAGE_PREFIX + 'certificates', JSON.stringify(sData.certificates));
         }
-        if (Array.isArray(sData.privateNotes)) {
+        if (!dirty.has('privateNotes') && Array.isArray(sData.privateNotes)) {
           setPrivateNotes(sData.privateNotes);
           localStorage.setItem(STORAGE_PREFIX + 'private_notes', JSON.stringify(sData.privateNotes));
         }
-        if (Array.isArray(sData.auditLogs)) {
+        if (!dirty.has('auditLogs') && Array.isArray(sData.auditLogs)) {
           setAuditLogs(sData.auditLogs);
           localStorage.setItem(STORAGE_PREFIX + 'audit_logs', JSON.stringify(sData.auditLogs));
         }
-        if (Array.isArray(sData.quizAttempts)) {
+        if (!dirty.has('quizAttempts') && Array.isArray(sData.quizAttempts)) {
           setQuizAttempts(sData.quizAttempts);
           localStorage.setItem(STORAGE_PREFIX + 'quiz_attempts', JSON.stringify(sData.quizAttempts));
         }
-        if (Array.isArray(sData.submissions)) {
+        if (!dirty.has('submissions') && Array.isArray(sData.submissions)) {
           setSubmissions(sData.submissions);
           localStorage.setItem(STORAGE_PREFIX + 'submissions', JSON.stringify(sData.submissions));
         }
@@ -720,6 +821,13 @@ export const LmsDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const issueCertificate = (studentId: string, courseId: string, studentName?: string, courseTitle?: string) => {
+    // Somente ADMIN/INSTRUCTOR podem homologar e emitir certificados.
+    // Alunos têm apenas 'certificate:view' (ver/baixar os já emitidos).
+    if (!currentUser || !hasPermission(currentUser.role, 'certificate:issue')) {
+      logAudit('CERTIFICATE_ISSUE_DENIED', { studentId, courseId, attemptedBy: currentUser?.id });
+      return null;
+    }
+
     const course = courses.find((c) => c.id === courseId);
     const certCode = `VLC-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
 

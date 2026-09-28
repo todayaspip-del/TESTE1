@@ -33,7 +33,7 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
   onSelectLesson,
 }) => {
   const { currentUser } = useAuth();
-  const { enrollments, lessonProgress, getCourseProgress, issueCertificate, certificates } = useLmsData();
+  const { enrollments, lessonProgress, getCourseProgress, certificates } = useLmsData();
 
   const [expandedModules, setExpandedModules] = useState<Record<string, boolean>>(() => {
     const initial: Record<string, boolean> = {};
@@ -64,9 +64,10 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
     ? certificates.find((c) => c.studentId === currentUser.id && c.courseId === course.id)
     : null;
 
-  const handleGenerateCertificate = () => {
-    if (!currentUser) return;
-    issueCertificate(currentUser.id, course.id);
+  // Alunos não podem emitir certificado — apenas visualizar um já homologado
+  // pelo administrador/instrutor. A emissão fica restrita ao painel admin.
+  const handleViewCertificate = () => {
+    if (!cert) return;
     setShowCertModal(true);
   };
 
@@ -150,17 +151,19 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
           )}
 
           {/* Certificate Trigger Button */}
-          {isComplete || cert ? (
+          {cert ? (
             <button
-              onClick={() => {
-                if (cert) setShowCertModal(true);
-                else handleGenerateCertificate();
-              }}
+              onClick={handleViewCertificate}
               className="w-full sm:w-auto flex items-center justify-center gap-2 px-5 py-2.5 rounded-none bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold transition shadow-lg shadow-orange-950/50 cursor-pointer"
             >
               <Award className="w-4 h-4" />
               <span>Ver Certificado NBR 14608</span>
             </button>
+          ) : isComplete ? (
+            <div className="text-xs text-slate-400 flex items-center gap-1.5">
+              <Award className="w-4 h-4 text-slate-400" />
+              <span>Curso concluído! Certificado será liberado pelo administrador após homologação.</span>
+            </div>
           ) : (
             <div className="text-xs text-slate-400 flex items-center gap-1.5">
               <Award className="w-4 h-4 text-slate-400" />
